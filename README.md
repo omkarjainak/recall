@@ -47,10 +47,12 @@ Recall treats memory as a graph of **entities**, **episodes** (evidence), and
 
 ## How it uses Relate
 
-- **Mode: single `.rl` file** for a live memory (`./memory.rl`) — the memory
-  is one portable artifact you can copy, back up with `relate clone`, or hand
-  to another agent. The demo store in `data/` is a **directory store with the
-  JSON codec** so judges can read the graph as plain JSON (`graph.json`).
+- **Mode: directory** (JSON codec) — the committed demo store lives at
+  [`data/demo-memory/`](data/demo-memory/), so judges can read the graph as
+  plain JSON (`graph.json`) and diffs stay reviewable. A live agent memory
+  runs as a **single `.rl` file** (`./memory.rl`) so it travels as one
+  portable artifact you can copy, back up with `relate clone`, or hand to
+  another agent.
 - **Why this mode:** an agent memory must survive restarts and travel with
   the agent. A single file (or a readable directory) does that with zero
   infrastructure. Relate runs *in-process* via the `relate-db` Python
