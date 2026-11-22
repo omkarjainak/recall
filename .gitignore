@@ -15,3 +15,6 @@ data/**/*.writer
 # Scratch stores go here instead:
 scratch/
 *.rl.tmp
+
+# Build output (demo video, screenshots):
+out/

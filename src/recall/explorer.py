@@ -111,8 +111,8 @@ const edges = GRAPH.edges.filter(e => byId[e.source] && byId[e.target])
 const W = () => svg.clientWidth || 900;
 const H = () => svg.clientHeight || 600;
 nodes.forEach((n, i) => {
-  n.x = W() / 2 + 180 * Math.cos((2 * Math.PI * i) / nodes.length);
-  n.y = H() / 2 + 180 * Math.sin((2 * Math.PI * i) / nodes.length);
+  n.x = W() / 2 + 260 * Math.cos((2 * Math.PI * i) / nodes.length);
+  n.y = H() / 2 + 220 * Math.sin((2 * Math.PI * i) / nodes.length);
   n.vx = 0; n.vy = 0;
 });
 
@@ -123,7 +123,7 @@ function step() {
       const a = nodes[i], b = nodes[j];
       let dx = b.x - a.x, dy = b.y - a.y;
       let d2 = dx * dx + dy * dy || 1;
-      const f = 1400 / d2;
+      const f = 2600 / d2;
       const d = Math.sqrt(d2);
       dx /= d; dy /= d;
       a.vx -= dx * f; a.vy -= dy * f;
@@ -135,7 +135,7 @@ function step() {
     const a = byId[e.source], b = byId[e.target];
     let dx = b.x - a.x, dy = b.y - a.y;
     const d = Math.sqrt(dx * dx + dy * dy) || 1;
-    const f = (d - 110) * 0.02;
+    const f = (d - 150) * 0.02;
     dx /= d; dy /= d;
     a.vx += dx * f; a.vy += dy * f;
     b.vx -= dx * f; b.vy -= dy * f;
@@ -150,6 +150,10 @@ function step() {
     n.y = Math.max(30, Math.min(H() - 30, n.y));
   }
 }
+
+// pre-settle: run the simulation synchronously so the graph is laid out
+// on first paint (and in a screenshot), then keep animating gently.
+for (let i = 0; i < 400; i++) step();
 
 // ---- drawing -------------------------------------------------------------
 function draw() {
@@ -201,7 +205,10 @@ svg.addEventListener("mousemove", ev => {
   dragging.x = ev.clientX - rect.left; dragging.y = ev.clientY - rect.top;
   dragging.vx = 0; dragging.vy = 0;
 });
-svg.addEventListener("mouseup", () => dragging = null);
+svg.addEventListener("mouseup", () => {
+  dragging = null;
+  settleFrames = 150;  // let the layout re-settle after a drag
+});
 
 let zoom = 1;
 svg.addEventListener("wheel", ev => {
@@ -243,8 +250,12 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
+let settleFrames = 150;
 function frame() {
-  if (!dragging) step();
+  if (!dragging && settleFrames > 0) {
+    step();
+    settleFrames--;
+  }
   draw();
   requestAnimationFrame(frame);
 }
