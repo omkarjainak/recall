@@ -103,7 +103,7 @@ Verify:
 
 ```bash
 recall --help
-pytest                             # 34 tests, ~10 s
+python -m pytest                   # 34 tests, ~10 s (needs: pip install -e ".[dev]")
 ```
 
 ### 2. See the whole story in 60 seconds
