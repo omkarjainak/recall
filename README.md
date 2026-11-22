@@ -85,22 +85,58 @@ Recall treats memory as a graph of **entities**, **episodes** (evidence), and
 
 ## Setup and run
 
-Prerequisites: Python 3.10+, and (optional) the [`relate` CLI](https://relatedb.ai/docs/get-started/install/)
+**Prerequisites:** Python 3.10+ (3.12 recommended). Nothing else — Relate
+runs in-process. Optionally install the [`relate` CLI](https://relatedb.ai/docs/get-started/install/)
 to inspect the store yourself.
 
+### 1. Install (works on macOS, Linux, Windows/WSL)
+
 ```bash
-git clone <this repo> && cd recall
-python -m venv .venv && source .venv/bin/activate
+git clone https://github.com/omkarjainak/recall
+cd recall
+python3 -m venv .venv
+source .venv/bin/activate          # Windows:  .venv\Scripts\activate
 pip install -e ".[mcp]"
 ```
 
-**First result in 30 seconds** — the scripted walkthrough:
+Verify:
+
+```bash
+recall --help
+pytest                             # 34 tests, ~10 s
+```
+
+### 2. See the whole story in 60 seconds
 
 ```bash
 recall demo
 ```
 
-**Use it from the command line:**
+This walks the canonical scenario: learn facts → a correction supersedes the
+old fact → two conflicting reports trigger a contradiction → recall answers
+with evidence and `[DISPUTED]` flags → a decision settles it → `why` and the
+true-vs-believed timeline. It writes to `./memory.rl` (created on first run).
+
+### 3. Ask the committed demo memory
+
+The repo ships a real store with that exact story at
+[`data/demo-memory/`](data/demo-memory/) — read it, don't rewrite it:
+
+```bash
+recall --db data/demo-memory recall "Where does Priya live?" -k 2
+recall --db data/demo-memory contradictions --all
+recall --db data/demo-memory timeline --slot relate/release-reviewer --on 2026-03-15
+recall --db data/demo-memory explore --open     # the memory graph in your browser
+```
+
+Or inspect the raw graph with the Relate CLI (read-only):
+
+```bash
+relate --database ./data/demo-memory --read-only \
+  "MATCH (f:Fact)-[:FROM]->(ep:Episode) RETURN f.text AS fact, f.status AS status, ep.kind AS learnedFrom"
+```
+
+### 4. Use it from the command line (your own memory)
 
 ```bash
 recall --db ./memory.rl remember "Ada reviews each relate release." \
@@ -116,8 +152,9 @@ recall --db ./memory.rl stats
 recall --db ./memory.rl explore --open     # draw the memory graph
 ```
 
-**Give an agent the memory** — the MCP server, e.g. for Claude Code /
-OpenCode / Cursor (`mcp.json`):
+### 5. Give an agent the memory (MCP server)
+
+For Claude Code / OpenCode / Cursor (`mcp.json`):
 
 ```json
 {
@@ -134,7 +171,7 @@ The agent gets ten tools: `remember`, `remember_many`, `recall`, `why`,
 `contradictions`, `resolve_contradiction`, `forget`, `timeline`, `stats`,
 `graph`.
 
-**Use it as a library:**
+### 6. Use it as a library
 
 ```python
 from recall import Memory
