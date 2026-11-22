@@ -96,14 +96,14 @@ git clone https://github.com/omkarjainak/recall
 cd recall
 python3 -m venv .venv
 source .venv/bin/activate          # Windows:  .venv\Scripts\activate
-pip install -e ".[mcp]"
+pip install -e ".[mcp]"            # to run the tests too: pip install -e ".[mcp,dev]"
 ```
 
 Verify:
 
 ```bash
 recall --help
-python -m pytest                   # 34 tests, ~10 s (needs: pip install -e ".[dev]")
+python -m pytest                   # 34 tests, ~10 s
 ```
 
 ### 2. See the whole story in 60 seconds
