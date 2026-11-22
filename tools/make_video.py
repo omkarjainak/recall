@@ -239,17 +239,94 @@ def end_card(f) -> Image.Image:
     return img
 
 
+def contradiction_card(f) -> Image.Image:
+    """The centerpiece: two facts that cannot both be true."""
+    img = Image.new("RGB", (W, H), BG)
+    d = ImageDraw.Draw(img)
+    d.text((W // 2, 120), "Contradiction — detected at write time",
+           font=f["h2"], fill=TEXT, anchor="mm")
+
+    def fact_panel(x, y, w, h, text, meta, evidence, border):
+        d.rounded_rectangle([x, y, x + w, y + h], 16, fill=PANEL, outline=border, width=3)
+        d.text((x + w / 2, y + 62), text, font=f["cap"], fill=TEXT, anchor="mm")
+        d.text((x + w / 2, y + 118), meta, font=f["small"], fill=DIM, anchor="mm")
+        d.text((x + w / 2, y + 162), evidence, font=f["small"], fill=border, anchor="mm")
+
+    fact_panel(120, 250, 620, 230,
+               "“Priya lives in Paris.”",
+               "recorded 2026-04-01  ·  slot priya/residence",
+               "evidence: Priya mentioned her Paris apartment", GREEN)
+    fact_panel(860, 250, 620, 230,
+               "“Priya lives in Berlin.”",
+               "recorded 2026-04-02  ·  slot priya/relocation",
+               "evidence: Dan said Priya relocated to Berlin", GREEN)
+
+    # red clash symbol between the panels
+    cx = W // 2
+    d.line([740, 365, 860, 365], fill=RED, width=4)
+    d.text((800, 330), "≠", font=ImageFont.truetype(SANS_BOLD, 84), fill=RED, anchor="mm")
+    d.rounded_rectangle([cx - 190, 520, cx + 190, 596], 14, fill=(56, 24, 34), outline=RED, width=3)
+    d.text((cx, 544), "CONTRADICTS", font=f["cap"], fill=RED, anchor="mm")
+    d.text((cx, 576), "claim score 0.50", font=f["small"], fill=RED, anchor="mm")
+
+    d.text((cx, 668), "same frame (“lives in”), different claim — they cannot both be true",
+           font=f["sub"], fill=TEXT, anchor="mm")
+    d.text((cx, 728), "both facts stay current, but every answer that uses them",
+           font=f["small"], fill=DIM, anchor="mm")
+    d.text((cx, 766), "is flagged DISPUTED until a decision settles it",
+           font=f["small"], fill=YELLOW, anchor="mm")
+    return img
+
+
+def resolution_card(f) -> Image.Image:
+    """The decision: one kept, one retracted, the reasoning recorded."""
+    img = Image.new("RGB", (W, H), BG)
+    d = ImageDraw.Draw(img)
+    d.text((W // 2, 120), "A decision settles it — recorded as memory",
+           font=f["h2"], fill=TEXT, anchor="mm")
+
+    def verdict(x, y, w, h, badge, badge_color, text, meta):
+        d.rounded_rectangle([x, y, x + w, y + h], 16, fill=PANEL, outline=badge_color, width=3)
+        d.rounded_rectangle([x + 28, y + 28, x + 168, y + 72], 10, fill=badge_color)
+        d.text((x + 98, y + 50), badge, font=f["small_b"], fill=BG, anchor="mm")
+        d.text((x + w / 2, y + 128), text, font=f["cap"], fill=TEXT, anchor="mm")
+        d.text((x + w / 2, y + 178), meta, font=f["small"], fill=DIM, anchor="mm")
+
+    verdict(120, 230, 620, 230, "KEEP", GREEN,
+            "“Priya lives in Berlin.”",
+            "stays current — the answer the agent gives")
+    verdict(860, 230, 620, 230, "RETRACT", RED,
+            "“Priya lives in Paris.”",
+            "closed as retracted — never deleted")
+
+    # the decision episode
+    d.rounded_rectangle([280, 530, W - 280, 650], 16, fill=(24, 32, 52), outline=CYAN, width=3)
+    d.text((W // 2, 562), "decision episode recorded", font=f["small_b"], fill=CYAN, anchor="mm")
+    d.text((W // 2, 600), "“HR confirmed the Berlin move in April.”",
+           font=f["sub"], fill=TEXT, anchor="mm")
+    d.text((W // 2, 628), "kind: decision  ·  so why() can still explain the outcome",
+           font=f["small"], fill=DIM, anchor="mm")
+
+    d.text((W // 2, 720), "contradiction: 1 found  ·  1 resolved  ·  0 open",
+           font=f["sub"], fill=GREEN, anchor="mm")
+    d.text((W // 2, 776), "nothing was deleted — resolution is a state change, not an erase",
+           font=f["small"], fill=DIM, anchor="mm")
+    return img
+
+
 def explorer_frame(path: Path, f) -> Image.Image:
     img = Image.new("RGB", (W, H), BG)
     if path.exists():
         shot = Image.open(path).convert("RGB")
-        shot = shot.resize((W, int(shot.height * W / shot.width)))
-        img.paste(shot.crop((0, 0, W, H)), (0, 0))
+        # zoom into the graph area, keeping 16:9 (no distortion)
+        shot = shot.crop((250, 115, 1450, 790)).resize((W, H))
+        img.paste(shot, (0, 0))
         d = ImageDraw.Draw(img)
-        d.rounded_rectangle([84, 30, 946, 86], 12, fill=(30, 36, 60))
-        d.ellipse([104, 47, 124, 67], fill=GREEN)
-        d.text((140, 46), "the whole memory as a graph — contradictions in red, supersessions dashed",
-               font=f["cap"], fill=TEXT)
+        d.rounded_rectangle([150, 812, W - 150, 864], 12, fill=(30, 36, 60))
+        d.ellipse([172, 826, 192, 846], fill=GREEN)
+        d.text((208, 826),
+               "red = contradiction (resolved)  ·  dashed = superseded  ·  grayed = closed — nothing deleted",
+               font=f["small_b"], fill=TEXT)
         return img
     d = ImageDraw.Draw(img)
     d.text((W // 2, H // 2), "(explorer screenshot missing)", font=f["sub"], fill=DIM, anchor="mm")
@@ -289,11 +366,22 @@ def demo_acts() -> list[tuple[str, list[str]]]:
         7: "The wow: what was TRUE vs what the agent BELIEVED on that date",
         8: "One embedded graph — no server, no signup",
     }
+    # section 8 prints a JSON blob; the video shows its meaning instead
+    stats_summary = [
+        "  facts:      3 current  ·  1 superseded  ·  1 retracted  ·  0 deleted",
+        "  evidence:   6 episodes  ·  5 entities  ·  4 slots",
+        "  conflicts:  1 found  ·  1 resolved  ·  0 open",
+    ]
     acts = []
     for n in sorted(sections):
         if n == 0 or not sections[n]:
             continue
-        acts.append((captions.get(n, ""), sections[n]))
+        lines = sections[n]
+        if n == 8:
+            head = [l for l in lines if "━━" in l]
+            tail = [l for l in lines if "Every fact kept" in l]
+            lines = head + stats_summary + tail
+        acts.append((n, captions.get(n, ""), lines))
     return acts
 
 
@@ -323,14 +411,14 @@ def main() -> None:
         ],
         f,
         sub="flat memory: a key, a value, and no way to argue",
-    ), 7.5, "001-problem.png")
+    ), 7.0, "001-problem.png")
 
-    save(model_card(f), 9.0, "002-model.png")
+    save(model_card(f), 8.0, "002-model.png")
 
     step = 10
     shown: list[str] = ["$ recall demo"]
     first = True
-    for caption, lines in demo_acts():
+    for n, caption, lines in demo_acts():
         if first:
             save(terminal_frame(shown, caption, f), 1.4, f"{step:03d}-prompt.png")
             step += 1
@@ -341,17 +429,24 @@ def main() -> None:
             if len(buf) >= 2:
                 shown.extend(buf)
                 buf = []
-                save(terminal_frame(shown, caption, f), 1.05, f"{step:03d}-term.png")
+                save(terminal_frame(shown, caption, f), 1.0, f"{step:03d}-term.png")
                 step += 1
         if buf:
             shown.extend(buf)
             save(terminal_frame(shown, caption, f), 1.4, f"{step:03d}-term.png")
             step += 1
-        save(terminal_frame(shown, caption, f), 1.4, f"{step:03d}-dwell.png")
+        save(terminal_frame(shown, caption, f), 1.3, f"{step:03d}-dwell.png")
         step += 1
+        # the two beats that must land get their own visual
+        if n == 3:
+            save(contradiction_card(f), 8.0, f"{step:03d}-conflict.png")
+            step += 1
+        if n == 5:
+            save(resolution_card(f), 8.0, f"{step:03d}-resolve.png")
+            step += 1
 
-    save(explorer_frame(OUT / "explorer.png", f), 9.0, "997-explorer.png")
-    save(relate_card(f), 8.0, "998-relate.png")
+    save(explorer_frame(OUT / "explorer.png", f), 8.0, "997-explorer.png")
+    save(relate_card(f), 7.0, "998-relate.png")
     save(end_card(f), 6.0, "999-end.png")
 
     total = sum(s for _, s in manifest)
