@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.DS_Store
+
+# Live stores are committed deliberately under data/ (JSON codec, diffable).
+# Runtime lock files are not:
+data/**/.cypherlite.*
+data/**/*.writer
+
+# Scratch stores go here instead:
+scratch/
+*.rl.tmp
