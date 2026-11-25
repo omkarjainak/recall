@@ -1,0 +1,29 @@
+{
+  "name": "travel-retrieval",
+  "task": "retrieval",
+  "description": "A travel-planning assistant's seeded memory (10 facts, distinct slots) and 8 questions with gold fact ids. Measures whether hybrid recall surfaces the right memories.",
+  "k": 3,
+  "thresholds": {"recall@3": 0.85, "mrr": 0.8},
+  "facts": [
+    {"id": "r1", "text": "The Colosseum requires a timed-entry ticket booked two days ahead.", "about": ["Colosseum"], "slot": "colosseum/ticket", "at": "2026-04-01T09:00:00Z"},
+    {"id": "r2", "text": "Our Rome apartment is in Trastevere, ten minutes from the tram stop.", "about": ["Rome apartment"], "slot": "rome/apartment", "at": "2026-04-01T09:05:00Z"},
+    {"id": "r3", "text": "The high-speed train to Florence leaves from Santa Maria Novella at 8:15 a.m.", "about": ["Florence train"], "slot": "train/florence", "at": "2026-04-01T09:10:00Z"},
+    {"id": "r4", "text": "Dinner at Trattoria Bianca is booked for 7:30 p.m. on Saturday.", "about": ["Trattoria Bianca"], "slot": "dinner/bianca", "at": "2026-04-02T18:00:00Z"},
+    {"id": "r5", "text": "The Uffizi gallery is closed on Mondays.", "about": ["Uffizi"], "slot": "uffizi/hours", "at": "2026-04-02T18:05:00Z"},
+    {"id": "r6", "text": "Our flight home lands at 6:40 p.m. on Sunday.", "about": ["return flight"], "slot": "flight/home", "at": "2026-04-02T18:10:00Z"},
+    {"id": "r7", "text": "The hotel provides a free airport shuttle every 30 minutes.", "about": ["hotel"], "slot": "hotel/shuttle", "at": "2026-04-03T08:00:00Z"},
+    {"id": "r8", "text": "Travel insurance covers medical evacuation up to 100000 euros.", "about": ["travel insurance"], "slot": "insurance/coverage", "at": "2026-04-03T08:05:00Z"},
+    {"id": "r9", "text": "The cable car to the fortress runs every 20 minutes in summer.", "about": ["cable car"], "slot": "cablecar/fortress", "at": "2026-04-03T08:10:00Z"},
+    {"id": "r10", "text": "Currency exchange at the airport charges a 4 percent commission.", "about": ["currency exchange"], "slot": "currency/exchange", "at": "2026-04-03T08:15:00Z"}
+  ],
+  "queries": [
+    {"query": "What time does the train to Florence leave?", "relevant": ["r3"]},
+    {"query": "When does our flight home land?", "relevant": ["r6"]},
+    {"query": "Is the Uffizi open on Mondays?", "relevant": ["r5"]},
+    {"query": "How do we get from the airport to the hotel?", "relevant": ["r7"]},
+    {"query": "What does the travel insurance cover?", "relevant": ["r8"]},
+    {"query": "Where is our Rome apartment?", "relevant": ["r2"]},
+    {"query": "Do I need a ticket for the Colosseum?", "relevant": ["r1"]},
+    {"query": "What is booked for Saturday dinner?", "relevant": ["r4"]}
+  ]
+}

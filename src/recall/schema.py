@@ -33,7 +33,7 @@ history stays queryable.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # status values on :Fact
 STATUS_CURRENT = "current"
@@ -48,6 +48,16 @@ KIND_DECISION = "decision"
 KIND_IMPORT = "import"
 
 
+def vector_index_statement(dimensions: int) -> str:
+    """The vector index, declaring the pre-filter properties recall uses."""
+    return (
+        "CREATE VECTOR INDEX fact_embedding IF NOT EXISTS "
+        "FOR (f:Fact) ON (f.embedding) WITH [f.closedAt, f.ns] "
+        "OPTIONS {indexConfig: {`vector.dimensions`: "
+        f"{dimensions}, `vector.similarity_function`: 'cosine'}}}}"
+    )
+
+
 def schema_statements(dimensions: int) -> list[str]:
     """Idempotent DDL for a fresh or existing store."""
     return [
@@ -60,12 +70,11 @@ def schema_statements(dimensions: int) -> list[str]:
         "CREATE INDEX fact_slot IF NOT EXISTS FOR (f:Fact) ON (f.slot)",
         "CREATE INDEX fact_status IF NOT EXISTS FOR (f:Fact) ON (f.status)",
         "CREATE INDEX fact_recorded IF NOT EXISTS FOR (f:Fact) ON (f.recordedAt)",
-        # The vector index declares f.closedAt so a recall search can drop
-        # closed facts *inside* the index, before LIMIT counts to k.
-        "CREATE VECTOR INDEX fact_embedding IF NOT EXISTS "
-        "FOR (f:Fact) ON (f.embedding) WITH [f.closedAt] "
-        "OPTIONS {indexConfig: {`vector.dimensions`: "
-        f"{dimensions}, `vector.similarity_function`: 'cosine'}}}}",
+        "CREATE INDEX fact_ns IF NOT EXISTS FOR (f:Fact) ON (f.ns)",
+        # The vector index declares f.closedAt and f.ns so a recall search can
+        # drop closed facts *and other namespaces* inside the index, before
+        # LIMIT counts to k.
+        vector_index_statement(dimensions),
         "CREATE FULLTEXT INDEX fact_text IF NOT EXISTS "
         "FOR (f:Fact) ON EACH [f.text]",
     ]

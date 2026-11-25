@@ -30,10 +30,16 @@ from mcp.server.mcpserver import MCPServer
 from .memory import Memory
 
 DEFAULT_DB = os.environ.get("RECALL_DB", "./memory.rl")
+DEFAULT_NAMESPACE = os.environ.get("RECALL_NAMESPACE", "default")
 
 
-def build_server(db_path: str = DEFAULT_DB, *, read_only: bool = False) -> MCPServer:
-    mem = Memory(db_path, read_only=read_only)
+def build_server(
+    db_path: str = DEFAULT_DB,
+    *,
+    read_only: bool = False,
+    namespace: str = DEFAULT_NAMESPACE,
+) -> MCPServer:
+    mem = Memory(db_path, read_only=read_only, namespace=namespace)
 
     server = MCPServer(
         name="recall",
@@ -45,7 +51,10 @@ def build_server(db_path: str = DEFAULT_DB, *, read_only: bool = False) -> MCPSe
             "answering questions about past context. When recall() returns "
             "disputed=true, the memory holds conflicting facts — use "
             "contradictions() and resolve_contradiction() to settle them. "
-            "why() explains where a memory came from."
+            "why() explains where a memory came from. Credentials are "
+            "redacted before they are written; pass sensitive=true for "
+            "private facts and include_sensitive=false to hide them from "
+            "recall()."
         ),
     )
 
@@ -64,6 +73,7 @@ def build_server(db_path: str = DEFAULT_DB, *, read_only: bool = False) -> MCPSe
         valid_from: str | None = None,
         importance: float = 0.5,
         contradicts: list[str] | None = None,
+        sensitive: bool = False,
     ) -> str:
         """Store one fact in long-term memory.
 
@@ -80,6 +90,9 @@ def build_server(db_path: str = DEFAULT_DB, *, read_only: bool = False) -> MCPSe
             valid_from: ISO time the fact became true (default: at).
             importance: 0..1 how much this matters (default 0.5).
             contradicts: Fact ids this explicitly conflicts with.
+            sensitive: Mark as private — hidden from recall() when the host
+                passes include_sensitive=false. Credential-shaped strings are
+                always redacted before writing, whatever this flag says.
         """
         report = mem.remember(
             text,
@@ -92,10 +105,15 @@ def build_server(db_path: str = DEFAULT_DB, *, read_only: bool = False) -> MCPSe
             valid_from=valid_from,
             importance=importance,
             contradicts=contradicts,
+            sensitive=sensitive,
         )
         notes = []
         if report["reinforced"]:
             notes.append("This duplicates an existing memory, which was reinforced.")
+        if report.get("redacted"):
+            notes.append(
+                f"Redacted before writing: {', '.join(report['redacted'])} — fact flagged sensitive."
+            )
         for s in report["superseded"]:
             notes.append(f"Superseded: {s['text']} ({s['id']})")
         for d in report["duplicates"]:
@@ -111,6 +129,7 @@ def build_server(db_path: str = DEFAULT_DB, *, read_only: bool = False) -> MCPSe
                 "notes": notes,
                 "conflicts": report["conflicts"],
                 "superseded": [s["id"] for s in report["superseded"]],
+                "sensitive": report["sensitive"],
             }
         )
 
@@ -136,7 +155,13 @@ def build_server(db_path: str = DEFAULT_DB, *, read_only: bool = False) -> MCPSe
         )
 
     @server.tool()
-    def recall(query: str, k: int = 5, entity: str | None = None, slot: str | None = None) -> str:
+    def recall(
+        query: str,
+        k: int = 5,
+        entity: str | None = None,
+        slot: str | None = None,
+        include_sensitive: bool = True,
+    ) -> str:
         """Answer a question from long-term memory.
 
         Returns ranked memories, each with its score, the episode it was
@@ -148,8 +173,12 @@ def build_server(db_path: str = DEFAULT_DB, *, read_only: bool = False) -> MCPSe
             k: How many memories to return.
             entity: Only memories about this entity.
             slot: Only memories answering this slot.
+            include_sensitive: Set false to exclude facts flagged sensitive
+                (private notes and anything whose credentials were redacted).
         """
-        return _dump(mem.recall(query, k=k, entity=entity, slot=slot))
+        return _dump(
+            mem.recall(query, k=k, entity=entity, slot=slot, include_sensitive=include_sensitive)
+        )
 
     @server.tool()
     def why(fact_id: str) -> str:
@@ -219,10 +248,15 @@ def main() -> None:
     parser.add_argument("--db", default=DEFAULT_DB, help="store path (default: ./memory.rl)")
     parser.add_argument("--read-only", action="store_true", help="serve without writes")
     parser.add_argument(
+        "--namespace",
+        default=DEFAULT_NAMESPACE,
+        help=f"namespace this server scopes to (default: {DEFAULT_NAMESPACE})",
+    )
+    parser.add_argument(
         "--transport", default="stdio", choices=["stdio", "streamable-http"], help="MCP transport"
     )
     args = parser.parse_args()
-    server = build_server(args.db, read_only=args.read_only)
+    server = build_server(args.db, read_only=args.read_only, namespace=args.namespace)
     server.run(transport=args.transport)
 
 

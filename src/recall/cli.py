@@ -8,8 +8,11 @@
     recall resolve f5 f4 --note "She moved to Berlin."
     recall timeline --slot relate/release-reviewer --on 2026-03-15
     recall stats
-    recall serve            # the MCP server for agent hosts
-    recall demo             # scripted end-to-end walkthrough
+    recall eval                # run the independent eval suite
+    recall serve               # the MCP server for agent hosts
+    recall demo                # scripted end-to-end walkthrough
+
+Global flags: --db PATH, --namespace NAME (multi-tenant scoping), --json.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from typing import Any
 from .memory import Memory
 
 DEFAULT_DB = os.environ.get("RECALL_DB", "./memory.rl")
+DEFAULT_NAMESPACE = os.environ.get("RECALL_NAMESPACE", "default")
 
 
 def _print_json(data: Any) -> None:
@@ -64,12 +68,15 @@ def cmd_remember(mem: Memory, args: argparse.Namespace) -> None:
         at=args.at,
         valid_from=args.valid_from,
         importance=args.importance,
+        sensitive=args.sensitive,
     )
     if args.json:
         _print_json(report)
         return
     f = report["fact"]
     print(f"remembered: {f['text']}  ({f['id']}, slot {f['slot']})")
+    if report.get("redacted"):
+        print(f"  redacted: {', '.join(report['redacted'])} — flagged sensitive")
     for s in report["superseded"]:
         print(f"  superseded: {s['text']} ({s['id']})")
     for d in report["duplicates"]:
@@ -79,7 +86,13 @@ def cmd_remember(mem: Memory, args: argparse.Namespace) -> None:
 
 
 def cmd_recall(mem: Memory, args: argparse.Namespace) -> None:
-    hits = mem.recall(args.query, k=args.k, entity=args.entity, slot=args.slot)
+    hits = mem.recall(
+        args.query,
+        k=args.k,
+        entity=args.entity,
+        slot=args.slot,
+        include_sensitive=not args.hide_sensitive,
+    )
     if args.json:
         _print_json(hits)
     else:
@@ -213,25 +226,55 @@ def cmd_query(mem: Memory, args: argparse.Namespace) -> None:
     _print_json(mem.query(args.cypher, params))
 
 
-def cmd_serve(mem: Memory, args: argparse.Namespace) -> None:
+def cmd_serve(mem: Memory | None, args: argparse.Namespace) -> None:
     from .mcp_server import build_server
 
-    mem.close()  # the server opens its own store
-    server = build_server(args.db, read_only=args.read_only)
+    # the server opens its own store handle
+    server = build_server(args.db, read_only=args.read_only, namespace=args.namespace)
     server.run(transport=args.transport)
 
 
-def cmd_demo(mem: Memory, args: argparse.Namespace) -> None:
+def cmd_demo(mem: Memory | None, args: argparse.Namespace) -> None:
     """A scripted end-to-end walkthrough of everything Recall can do."""
     from .demo import run_demo
 
-    mem.close()
     run_demo(args.db, as_json=args.json)
+
+
+def cmd_eval(mem: Memory | None, args: argparse.Namespace) -> None:
+    """Run the independent eval suite (evals/data) against Recall itself."""
+    from .evaluation import run_eval
+
+    # evals build their own fresh in-memory stores; no --db needed
+    report = run_eval(data_dir=args.data)
+    if args.json:
+        _print_json(report)
+    else:
+        print(f"Recall eval suite — {report['datasets']} datasets, "
+              f"{report['cases']} cases, {report['elapsed_ms']} ms")
+        print()
+        for task in report["tasks"]:
+            print(f"{task['name']}  ({task['cases']} cases)")
+            for metric in task["metrics"]:
+                bar = "#" * round(metric["value"] * 20)
+                print(f"  {metric['name']:<22} {metric['value']:.3f}  {bar}")
+                if metric.get("detail"):
+                    print(f"    {metric['detail']}")
+            print()
+        verdict = "PASS" if report["passed"] else "FAIL"
+        print(f"thresholds: {verdict}")
+    if not report["passed"] and not args.no_check:
+        sys.exit(1)
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="recall", description="Contradiction-aware agent memory on Relate")
     p.add_argument("--db", default=DEFAULT_DB, help=f"store path (default: {DEFAULT_DB})")
+    p.add_argument(
+        "--namespace",
+        default=DEFAULT_NAMESPACE,
+        help=f"namespace to scope this session to (default: {DEFAULT_NAMESPACE})",
+    )
     p.add_argument("--json", action="store_true", help="machine-readable output")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -247,12 +290,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--at", help="ISO time it was learned")
     sp.add_argument("--valid-from", help="ISO time it became true")
     sp.add_argument("--importance", type=float, default=0.5)
+    sp.add_argument("--sensitive", action="store_true", help="hide from recall unless asked for")
 
     sp = sub.add_parser("recall", help="ask a question of memory")
     sp.add_argument("query")
     sp.add_argument("-k", type=int, default=5)
     sp.add_argument("--entity")
     sp.add_argument("--slot")
+    sp.add_argument(
+        "--hide-sensitive",
+        action="store_true",
+        help="exclude facts flagged sensitive (redacted credentials, private notes)",
+    )
 
     sp = sub.add_parser("why", help="provenance of a fact")
     sp.add_argument("fact_id")
@@ -297,6 +346,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("demo", help="scripted end-to-end walkthrough")
 
+    sp = sub.add_parser("eval", help="run the independent eval suite (evals/data)")
+    sp.add_argument("--data", default="evals/data", help="dataset directory (default: evals/data)")
+    sp.add_argument("--no-check", action="store_true", help="report metrics without enforcing thresholds")
+
+    # The global flags also work after the subcommand: `recall remember ... --json`
+    # is what people actually type. SUPPRESS keeps a pre-subcommand value from
+    # being overwritten by the subparser default.
+    for sp in sub.choices.values():
+        sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+        sp.add_argument("--db", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+        sp.add_argument("--namespace", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+
     return p
 
 
@@ -316,12 +377,21 @@ COMMANDS = {
     "query": cmd_query,
     "serve": cmd_serve,
     "demo": cmd_demo,
+    "eval": cmd_eval,
 }
+
+# Commands that open the store themselves (or need no store at all) — the
+# CLI must not pre-open --db for them, or it would leave a stray file behind
+# (eval) or hold the connection lock (serve, demo).
+SELF_STORED = {"serve", "demo", "eval"}
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    mem = Memory(args.db)
+    if args.command in SELF_STORED:
+        COMMANDS[args.command](None, args)
+        return
+    mem = Memory(args.db, namespace=args.namespace)
     try:
         COMMANDS[args.command](mem, args)
     finally:

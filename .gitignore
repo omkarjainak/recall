@@ -13,6 +13,7 @@ build/
 # Scratch stores go here instead:
 scratch/
 *.rl.tmp
+/memory.rl
 
 # Build output (demo video, screenshots):
 out/

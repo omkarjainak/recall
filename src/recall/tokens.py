@@ -59,8 +59,17 @@ _NEGATION_RE = re.compile(
 
 
 def claim_tokens(text: str) -> set[str]:
-    """The asserted details: content words minus frame and filler words."""
-    return {t for t in tokenize(text) if t not in _CLAIM_STOP and len(t) > 1}
+    """The asserted details: content words minus frame and filler words.
+
+    Single-character tokens are dropped (letters like the "m" of "a.m."),
+    but digits are kept: "opens at 9" and "opens at 5" assert different
+    things even though each number is one character long.
+    """
+    return {
+        t
+        for t in tokenize(text)
+        if t not in _CLAIM_STOP and (len(t) > 1 or any(ch.isdigit() for ch in t))
+    }
 
 
 def frame_tokens(text: str) -> set[str]:
@@ -107,7 +116,14 @@ def contradiction_score(text_a: str, text_b: str, embedding_similarity: float) -
 
 
 def duplicate_score(text_a: str, text_b: str, embedding_similarity: float) -> float:
-    """How likely two facts say the same thing, in [0, 1]."""
+    """How likely two facts say the same thing, in [0, 1].
+
+    A negation flip can never be a duplicate: "the API is public" and
+    "the API is not public" share every token but assert opposite things,
+    so they score 0 here and are left to :func:`contradiction_score`.
+    """
+    if has_negation(text_a) != has_negation(text_b):
+        return 0.0
     sim = max(0.0, embedding_similarity)
     overlap = jaccard(claim_tokens(text_a), claim_tokens(text_b))
     frame = jaccard(frame_tokens(text_a), frame_tokens(text_b))

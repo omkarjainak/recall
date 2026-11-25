@@ -1,0 +1,34 @@
+{
+  "name": "travel-contradictions",
+  "task": "contradiction",
+  "description": "Hand-written pairs from a travel-planning assistant's memory: same-frame disagreements, paraphrases, and unrelated facts. Gold labels; scored with Recall's own claim analysis.",
+  "thresholds": {"accuracy": 0.85, "macro_f1": 0.8},
+  "cases": [
+    {"a": "The Louvre opens at 9 a.m. on weekdays.", "b": "The Louvre opens at 10 a.m. on weekdays.", "label": "contradiction"},
+    {"a": "The hotel charges a resort fee.", "b": "The hotel charges no resort fee.", "label": "contradiction"},
+    {"a": "A passport is required for entry.", "b": "A passport is not required for entry.", "label": "contradiction"},
+    {"a": "The museum is closed on Mondays.", "b": "The museum is open on Mondays.", "label": "contradiction"},
+    {"a": "Flights to Tokyo cost 900 dollars.", "b": "Flights to Tokyo cost 1400 dollars.", "label": "contradiction"},
+    {"a": "The guided tour includes lunch.", "b": "The guided tour includes no lunch.", "label": "contradiction"},
+    {"a": "Vienna is the capital of Austria.", "b": "Vienna is the capital of Hungary.", "label": "contradiction"},
+    {"a": "The airport bus runs every 30 minutes.", "b": "The airport bus runs every 60 minutes.", "label": "contradiction"},
+    {"a": "Breakfast is served until 10 a.m.", "b": "Breakfast is served until 11 a.m.", "label": "contradiction"},
+    {"a": "The train to Berlin leaves at 8 p.m.", "b": "The train to Berlin leaves at 9:30 p.m.", "label": "contradiction"},
+
+    {"a": "Entry to the Acropolis costs 20 euros.", "b": "Entry to the Acropolis costs 20 euros!", "label": "duplicate"},
+    {"a": "The guided tour of the old town lasts about two hours.", "b": "The guided tour of the old town lasts about 2 hours.", "label": "duplicate"},
+    {"a": "Breakfast is included in the room rate.", "b": "Breakfast is included in every room rate.", "label": "duplicate"},
+    {"a": "Our suite has a balcony facing the sea.", "b": "Our suite has a balcony facing the sea.", "label": "duplicate"},
+    {"a": "The Colosseum requires a timed-entry ticket.", "b": "The Colosseum requires a timed entry ticket!", "label": "duplicate"},
+    {"a": "The hotel is 10 minutes from the central station.", "b": "The central station is 10 minutes from the hotel.", "label": "duplicate"},
+    {"a": "Travel insurance covers medical evacuation.", "b": "The travel insurance covers medical evacuation.", "label": "duplicate"},
+    {"a": "Dinner is booked for 7:30 p.m. on Saturday.", "b": "Dinner is booked for 7:30 p.m. on Saturday.", "label": "duplicate"},
+
+    {"a": "The hotel holds luggage before check-in.", "b": "The hotel charges a nightly city tax.", "label": "unrelated"},
+    {"a": "The airport runs a night bus to downtown.", "b": "The museum is closed on Mondays.", "label": "unrelated"},
+    {"a": "Our guide speaks German and Italian.", "b": "The ticket includes skip-the-line entry.", "label": "unrelated"},
+    {"a": "The room is non-smoking.", "b": "The minibar contains snacks.", "label": "unrelated"},
+    {"a": "The palace belongs to the royal family.", "b": "The river runs through the old town.", "label": "unrelated"},
+    {"a": "The bus operates every 15 minutes.", "b": "The cable car closes for maintenance in November.", "label": "unrelated"}
+  ]
+}

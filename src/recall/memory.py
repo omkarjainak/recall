@@ -27,8 +27,17 @@ from typing import Any
 
 from . import schema
 from .embed import Embedder, HashingEmbedder, cosine
+from .policies import (
+    SLOT_STRATEGIES,
+    ContradictionChecker,
+    LexicalContradictionChecker,
+    RankingPolicy,
+    SlotStrategy,
+    claim_slot,
+)
+from .privacy import scrub
 from .store import Store, parse_iso, to_iso, utcnow_iso
-from .tokens import contradiction_score, duplicate_score
+from .tokens import duplicate_score
 
 Row = dict[str, Any]
 
@@ -61,6 +70,25 @@ class Memory:
         Open without writes (recall/why/stats only; no access tracking).
     conflict_threshold / duplicate_threshold:
         Tuning knobs for the claim analysis in ``recall.tokens``.
+    namespace:
+        Isolates this memory's facts inside a shared store (multi-agent or
+        multi-tenant). Facts and episodes carry ``ns``; every read and write
+        is scoped to it. The default keeps the whole store.
+    slot_strategy:
+        How a fact without an explicit ``slot`` derives one — a name from
+        ``recall.policies`` (``"claim"``, ``"entity"``, ``"unique"``) or any
+        ``(text, entity_keys) -> slot`` callable. Controls supersession.
+    checker:
+        How candidate pairs are scored for contradiction. Defaults to the
+        offline lexical checker; wrap an NLI model with
+        ``recall.policies.FunctionChecker`` to go model-assisted.
+    ranking:
+        The weights behind hybrid recall's final score (see
+        ``recall.policies.RankingPolicy``).
+    scrub_secrets:
+        Redact credential-shaped strings from fact text and evidence before
+        they are written (default on). Facts that had something redacted are
+        flagged ``sensitive``.
     """
 
     def __init__(
@@ -72,6 +100,11 @@ class Memory:
         conflict_threshold: float = CONFLICT_THRESHOLD,
         duplicate_threshold: float = DUPLICATE_THRESHOLD,
         halflife_days: float = DEFAULT_HALFLIFE_DAYS,
+        namespace: str = "default",
+        slot_strategy: str | SlotStrategy = "claim",
+        checker: ContradictionChecker | None = None,
+        ranking: RankingPolicy | None = None,
+        scrub_secrets: bool = True,
     ) -> None:
         self.store = Store(path, read_only=read_only)
         self.embedder = embedder or HashingEmbedder()
@@ -79,6 +112,20 @@ class Memory:
         self.conflict_threshold = conflict_threshold
         self.duplicate_threshold = duplicate_threshold
         self.halflife_days = halflife_days
+        self.namespace = namespace or "default"
+        if isinstance(slot_strategy, str):
+            try:
+                self.slot_strategy: SlotStrategy = SLOT_STRATEGIES[slot_strategy]
+            except KeyError:
+                raise ValueError(
+                    f"unknown slot strategy {slot_strategy!r}; "
+                    f"choose from {sorted(SLOT_STRATEGIES)}"
+                ) from None
+        else:
+            self.slot_strategy = slot_strategy
+        self.checker = checker or LexicalContradictionChecker()
+        self.ranking = ranking or RankingPolicy()
+        self.scrub_secrets = scrub_secrets
         self._ensure_schema()
 
     def close(self) -> None:
@@ -105,6 +152,8 @@ class Memory:
                     f"store was created with {stored['dims']}-dimension embeddings, "
                     f"but this embedder produces {self.dims}"
                 )
+            if (stored["version"] or 1) < schema.SCHEMA_VERSION:
+                self._migrate(stored["version"] or 1)
             return
         for stmt in schema.schema_statements(self.dims):
             self.store.write(stmt)
@@ -119,6 +168,40 @@ class Memory:
                 "now": utcnow_iso(),
             },
         )
+
+    def _migrate(self, from_version: int) -> None:
+        """Bring a pre-namespace store up to the current schema.
+
+        v1 -> v2: every existing fact and episode joins the namespace that
+        opens the store first (legacy data has no ``ns``), and the vector
+        index is rebuilt to declare ``f.ns`` so recall can pre-filter by
+        namespace before ``LIMIT`` counts to k. Idempotent; runs inside one
+        transaction. Read-only opens cannot migrate and say so.
+        """
+        if self.store.read_only:
+            raise ValueError(
+                f"store is at schema v{from_version}, needs v{schema.SCHEMA_VERSION}; "
+                "open it once without read_only to migrate"
+            )
+        ns = self.namespace
+
+        def _tx(st: Store) -> None:
+            st.run(
+                "MATCH (f:Fact) WHERE f.ns IS NULL SET f.ns = $ns",
+                {"ns": ns},
+            )
+            st.run(
+                "MATCH (ep:Episode) WHERE ep.ns IS NULL SET ep.ns = $ns",
+                {"ns": ns},
+            )
+            st.run("DROP INDEX fact_embedding IF EXISTS")
+            st.run(schema.vector_index_statement(self.dims))
+            st.run(
+                "MATCH (m:Meta {key: $key}) SET m.version = $version",
+                {"key": schema.META_KEY, "version": schema.SCHEMA_VERSION},
+            )
+
+        self.store.transact(_tx)
 
     # ------------------------------------------------------------------
     # entities
@@ -167,16 +250,22 @@ class Memory:
         contradicts: list[str] | None = None,
         id: str | None = None,
         episode_id: str | None = None,
+        sensitive: bool = False,
     ) -> Row:
         """Write one fact and report what it replaced, repeated, or conflicts with.
 
         ``about`` names the entities the fact is about (keys are slugs).
         ``slot`` names the question the fact answers; a fact in an existing
         slot *supersedes* the slot's current fact. Without a slot, Recall
-        derives one from the leading entity and the claim's content words.
+        derives one via the memory's ``slot_strategy``.
+
+        ``sensitive=True`` marks the fact private (or it is marked
+        automatically when a credential was redacted); hosts can then hide
+        such facts from ``recall`` with ``include_sensitive=False``.
 
         Returns a report dict: ``fact``, ``superseded``, ``duplicates``,
-        ``conflicts`` (contradiction candidates, each with a score).
+        ``conflicts`` (contradiction candidates, each with a score),
+        ``sensitive`` and ``redacted`` (kinds of credentials scrubbed).
         """
         if not text or not text.strip():
             raise ValueError("text must be non-empty")
@@ -185,17 +274,24 @@ class Memory:
         at = at or utcnow_iso()
         valid_from = valid_from or at
         about = about or []
+
+        # -- privacy: credentials never enter the graph -------------------
+        redacted: list[str] = []
+        if self.scrub_secrets:
+            text, kinds = scrub(text)
+            redacted.extend(kinds)
+            if evidence:
+                evidence, kinds = scrub(evidence)
+                redacted.extend(kinds)
+        is_sensitive = bool(redacted) or sensitive
+
         embedding = embedding or self.embedder.embed(text)
         if len(embedding) != self.dims:
             raise ValueError(f"embedding must have {self.dims} dimensions, got {len(embedding)}")
 
         entity_keys = self._upsert_entities(about)
         if slot is None:
-            primary = entity_keys[0] if entity_keys else "memory"
-            from .tokens import claim_tokens
-
-            claim = "-".join(sorted(claim_tokens(text))[:3])
-            slot = f"{primary}/{claim or _slug(text[:40])}"
+            slot = self.slot_strategy(text, entity_keys)
 
         fact_id = id or _new_id("f")
         ep_id = episode_id or _new_id("e")
@@ -221,7 +317,7 @@ class Memory:
             if cand["slot"] == slot:
                 supersede_ids.append(cid)
                 continue
-            conflict = contradiction_score(text, cand["text"], sim)
+            conflict = self.checker.score(text, cand["text"], sim)
             if conflict >= self.conflict_threshold:
                 conflicts.append(
                     {
@@ -264,13 +360,15 @@ class Memory:
                 "superseded": [],
                 "conflicts": [],
                 "reinforced": True,
+                "sensitive": is_sensitive,
+                "redacted": redacted,
             }
 
         # -- write: episode, fact, edges, supersessions, contradictions --
         def _tx(st: Store) -> None:
             st.run(
                 "CREATE (ep:Episode {id: $id, session: $session, kind: $kind, "
-                "at: datetime($at), text: $text, source: $source})",
+                "at: datetime($at), text: $text, source: $source, ns: $ns})",
                 {
                     "id": ep_id,
                     "session": session,
@@ -278,6 +376,7 @@ class Memory:
                     "at": at,
                     "text": evidence or text,
                     "source": "recall",
+                    "ns": self.namespace,
                 },
             )
             if entity_keys:
@@ -292,7 +391,8 @@ class Memory:
                 "validFrom: datetime($validFrom), recordedAt: datetime($recordedAt), "
                 "embedding: vector($embedding, $dims, FLOAT32), "
                 "importance: $importance, confidence: $confidence, tags: $tags, "
-                "accessCount: 0, lastAccessed: null, createdAt: $now}) "
+                "accessCount: 0, lastAccessed: null, createdAt: $now, "
+                "ns: $ns, sensitive: $sensitive, redacted: $redacted}) "
                 "CREATE (f)-[:FROM]->(ep)",
                 {
                     "ep": ep_id,
@@ -308,6 +408,9 @@ class Memory:
                     "confidence": confidence,
                     "tags": tags or [],
                     "now": now,
+                    "ns": self.namespace,
+                    "sensitive": is_sensitive,
+                    "redacted": redacted,
                 },
             )
             if entity_keys:
@@ -346,6 +449,8 @@ class Memory:
             "duplicates": duplicates,
             "conflicts": conflicts,
             "reinforced": False,
+            "sensitive": is_sensitive,
+            "redacted": redacted,
         }
 
     def remember_batch(self, items: list[Row]) -> list[Row]:
@@ -358,11 +463,11 @@ class Memory:
     def _conflict_candidates(self, slot: str, entity_keys: list[str], exclude: tuple[str, ...]) -> list[Row]:
         rows = self.store.run(
             "MATCH (f:Fact) "
-            "WHERE f.closedAt IS NULL AND NOT f.id IN $exclude "
+            "WHERE f.closedAt IS NULL AND f.ns = $ns AND NOT f.id IN $exclude "
             "AND (f.slot = $slot OR EXISTS { MATCH (f)-[:ABOUT]->(e:Entity) WHERE e.key IN $keys }) "
             "RETURN f.id AS id, f.text AS text, f.slot AS slot, f.embedding AS embedding "
             "LIMIT 500",
-            {"slot": slot, "keys": entity_keys, "exclude": list(exclude)},
+            {"slot": slot, "keys": entity_keys, "exclude": list(exclude), "ns": self.namespace},
         )
         out = []
         for r in rows:
@@ -388,12 +493,18 @@ class Memory:
         entity: str | None = None,
         slot: str | None = None,
         touch: bool = True,
+        include_sensitive: bool = True,
     ) -> list[Row]:
         """Answer a question from memory, ranked, with evidence and conflicts.
 
         Hybrid retrieval: a vector search and a full-text search fused by
         reciprocal rank inside one Cypher statement, then re-ranked here by
-        similarity, recency decay, reinforcement and importance.
+        the memory's ``ranking`` policy (similarity, recency decay,
+        reinforcement and importance). Both legs are pre-filtered to this
+        memory's namespace *inside* the indexes, before ``LIMIT`` counts to k.
+
+        ``include_sensitive=False`` hides facts flagged sensitive (explicitly
+        or because a credential was redacted when they were written).
 
         Each hit: ``id``, ``text``, ``slot``, ``score`` (and its parts),
         ``evidence`` (the episode it came from), ``about``, ``replaced``,
@@ -406,7 +517,8 @@ class Memory:
             """
             CALL () {
               MATCH (f:Fact)
-              SEARCH f IN (VECTOR INDEX fact_embedding FOR $vector WHERE f.closedAt IS NULL LIMIT $k2)
+              SEARCH f IN (VECTOR INDEX fact_embedding FOR $vector
+                           WHERE f.closedAt IS NULL AND f.ns = $ns LIMIT $k2)
                 SCORE AS score
               WITH f ORDER BY score DESC, f.id
               WITH collect(f) AS fs
@@ -415,7 +527,7 @@ class Memory:
               UNION ALL
               MATCH (f:Fact)
               SEARCH f IN (FULLTEXT INDEX fact_text FOR $q LIMIT $k2) SCORE AS score
-              WITH f, score WHERE f.closedAt IS NULL
+              WITH f, score WHERE f.closedAt IS NULL AND f.ns = $ns
               WITH f ORDER BY score DESC, f.id
               WITH collect(f) AS fs
               UNWIND range(0, size(fs) - 1) AS i
@@ -426,6 +538,7 @@ class Memory:
                  min(CASE list WHEN 'fulltext' THEN rank END) AS fulltext_rank
             WHERE ($slot IS NULL OR f.slot = $slot)
               AND ($entity IS NULL OR EXISTS { MATCH (f)-[:ABOUT]->(:Entity {key: $entity}) })
+              AND ($includeSensitive OR coalesce(f.sensitive, false) = false)
             ORDER BY rrf DESC, f.id
             LIMIT $k2
             RETURN f.id AS id, f.text AS text, f.slot AS slot, f.status AS status,
@@ -439,11 +552,21 @@ class Memory:
                              RETURN {key: e.key, name: e.name} } AS about,
                    COLLECT { MATCH (f)-[:SUPERSEDES]->(old:Fact)
                              RETURN {id: old.id, text: old.text} } AS replaced,
-                   COLLECT { MATCH (f)-[c:CONTRADICTS]-(other:Fact) WHERE other.closedAt IS NULL
+                   COLLECT { MATCH (f)-[c:CONTRADICTS]-(other:Fact)
+                             WHERE other.closedAt IS NULL AND other.ns = $ns
+                               AND ($includeSensitive OR coalesce(other.sensitive, false) = false)
                              RETURN {id: other.id, text: other.text,
                                     score: c.score, resolved: c.resolved} } AS conflicts
             """,
-            {"vector": list(qvec), "q": query, "k2": k2, "slot": slot, "entity": entity},
+            {
+                "vector": list(qvec),
+                "q": query,
+                "k2": k2,
+                "slot": slot,
+                "entity": entity,
+                "ns": self.namespace,
+                "includeSensitive": include_sensitive,
+            },
         )
 
         max_rrf = max((r["rrf"] for r in rows), default=1.0) or 1.0
@@ -453,14 +576,18 @@ class Memory:
             vec = list(emb.values) if hasattr(emb, "values") else list(emb)
             sim = cosine(qvec, vec)
             rrf_norm = r["rrf"] / max_rrf
-            relevance = 0.7 * sim + 0.3 * rrf_norm
 
             recorded = to_iso(r["recordedAt"])
             age_days = self._age_days(recorded)
             recency = 0.5 ** (age_days / self.halflife_days)
             reinforcement = 1.0 + math.log(1.0 + (r["accessCount"] or 0))
-            importance_factor = 0.5 + (r["importance"] or 0.5)
-            score = relevance * (0.5 + 0.5 * recency) * min(reinforcement, 2.0) * importance_factor
+            score = self.ranking.score(
+                similarity=sim,
+                rrf_norm=rrf_norm,
+                recency=recency,
+                reinforcement=reinforcement,
+                importance=r["importance"] or 0.5,
+            )
 
             conflicts = [
                 {
@@ -573,12 +700,12 @@ class Memory:
             {"id": fact_id},
         )
         slot_history = self.store.run(
-            "MATCH (f:Fact {slot: $slot}) "
+            "MATCH (f:Fact {slot: $slot}) WHERE f.ns = $ns "
             "RETURN f.id AS id, f.text AS text, f.status AS status, "
             "f.validFrom AS validFrom, f.validTo AS validTo, "
             "f.recordedAt AS recordedAt, f.closedAt AS closedAt "
             "ORDER BY f.recordedAt",
-            {"slot": fact["slot"]},
+            {"slot": fact["slot"], "ns": self.namespace},
         )
 
         def _times(r: Row) -> Row:
@@ -603,13 +730,14 @@ class Memory:
     # ------------------------------------------------------------------
     def get_fact(self, fact_id: str) -> Row | None:
         rows = self.store.run(
-            "MATCH (f:Fact {id: $id}) "
+            "MATCH (f:Fact {id: $id}) WHERE f.ns = $ns "
             "RETURN f.id AS id, f.text AS text, f.slot AS slot, f.status AS status, "
             "f.validFrom AS validFrom, f.validTo AS validTo, "
             "f.recordedAt AS recordedAt, f.closedAt AS closedAt, "
             "f.importance AS importance, f.confidence AS confidence, "
-            "f.accessCount AS accessCount, f.lastAccessed AS lastAccessed, f.tags AS tags",
-            {"id": fact_id},
+            "f.accessCount AS accessCount, f.lastAccessed AS lastAccessed, f.tags AS tags, "
+            "f.sensitive AS sensitive, f.redacted AS redacted, f.ns AS ns",
+            {"id": fact_id, "ns": self.namespace},
         )
         if not rows:
             return None
@@ -622,10 +750,10 @@ class Memory:
         """Retract a fact. It is closed, never deleted: history survives."""
         now = utcnow_iso()
         rows = self.store.run(
-            "MATCH (f:Fact {id: $id}) "
+            "MATCH (f:Fact {id: $id}) WHERE f.ns = $ns "
             "SET f.closedAt = datetime($now), f.status = $status, f.retractedReason = $reason "
             "RETURN f.id AS id, f.text AS text, f.status AS status",
-            {"id": fact_id, "now": now, "status": schema.STATUS_RETRACTED, "reason": reason},
+            {"id": fact_id, "now": now, "status": schema.STATUS_RETRACTED, "reason": reason, "ns": self.namespace},
         )
         if not rows:
             raise KeyError(f"no fact with id {fact_id!r}")
@@ -646,7 +774,7 @@ class Memory:
         """
         now = utcnow_iso()
         closed = self.store.run(
-            "MATCH (f:Fact) WHERE f.closedAt IS NULL "
+            "MATCH (f:Fact) WHERE f.closedAt IS NULL AND f.ns = $ns "
             "AND f.importance < $min_importance "
             "AND coalesce(f.accessCount, 0) = 0 "
             "AND f.recordedAt < datetime($cutoff) "
@@ -657,6 +785,7 @@ class Memory:
                 "cutoff": self._iso_before(older_than_days),
                 "now": now,
                 "status": schema.STATUS_EXPIRED,
+                "ns": self.namespace,
             },
         )
         stats = self.stats()
@@ -676,13 +805,13 @@ class Memory:
         """Every contradiction pair in memory, newest detection first."""
         rows = self.store.run(
             "MATCH (a:Fact)-[c:CONTRADICTS]->(b:Fact) "
-            "WHERE $all OR NOT c.resolved "
+            "WHERE a.ns = $ns AND b.ns = $ns AND ($all OR NOT c.resolved) "
             "RETURN a.id AS a_id, a.text AS a_text, a.status AS a_status, "
             "b.id AS b_id, b.text AS b_text, b.status AS b_status, "
             "c.score AS score, c.resolved AS resolved, c.resolution AS resolution, "
             "c.note AS note, c.detectedAt AS detectedAt "
             "ORDER BY c.detectedAt DESC",
-            {"all": include_resolved},
+            {"all": include_resolved, "ns": self.namespace},
         )
         out = []
         for r in rows:
@@ -714,12 +843,13 @@ class Memory:
         def _tx(st: Store) -> None:
             st.run(
                 "CREATE (ep:Episode {id: $id, session: 'decisions', kind: $kind, "
-                "at: datetime($now), text: $text, source: 'recall'})",
+                "at: datetime($now), text: $text, source: 'recall', ns: $ns})",
                 {
                     "id": ep_id,
                     "kind": schema.KIND_DECISION,
                     "now": now,
                     "text": note or f"Resolved contradiction: kept {keep_id}, retracted {drop_id}.",
+                    "ns": self.namespace,
                 },
             )
             st.run(
@@ -785,20 +915,21 @@ class Memory:
         else:
             rows = self.store.run(
                 "MATCH (f:Fact)-[:ABOUT]->(e:Entity {key: $key}) "
+                "WHERE f.ns = $ns "
                 "RETURN DISTINCT f.slot AS slot ORDER BY slot",
-                {"key": self._entity_key(entity)},
+                {"key": self._entity_key(entity), "ns": self.namespace},
             )
             slots = [r["slot"] for r in rows]
 
         result: Row = {"slots": {}}
         for s in slots:
             facts = self.store.run(
-                "MATCH (f:Fact {slot: $slot}) "
+                "MATCH (f:Fact {slot: $slot}) WHERE f.ns = $ns "
                 "RETURN f.id AS id, f.text AS text, f.status AS status, "
                 "f.validFrom AS validFrom, f.validTo AS validTo, "
                 "f.recordedAt AS recordedAt, f.closedAt AS closedAt "
                 "ORDER BY f.recordedAt",
-                {"slot": s},
+                {"slot": s, "ns": self.namespace},
             )
             for f in facts:
                 for k in ("validFrom", "validTo", "recordedAt", "closedAt"):
@@ -831,28 +962,52 @@ class Memory:
     # stats / export
     # ------------------------------------------------------------------
     def stats(self) -> Row:
+        ns = self.namespace
         counts = self.store.run(
-            "MATCH (f:Fact) RETURN f.status AS status, count(*) AS n ORDER BY status"
+            "MATCH (f:Fact) WHERE f.ns = $ns "
+            "RETURN f.status AS status, count(*) AS n ORDER BY status",
+            {"ns": ns},
         )
         by_status = {r["status"] or "current": r["n"] for r in counts}
-        entities = self.store.run("MATCH (e:Entity) RETURN count(e) AS n")[0]["n"]
-        episodes = self.store.run("MATCH (ep:Episode) RETURN count(ep) AS n")[0]["n"]
+        entities = self.store.run(
+            "MATCH (f:Fact)-[:ABOUT]->(e:Entity) WHERE f.ns = $ns "
+            "RETURN count(DISTINCT e) AS n",
+            {"ns": ns},
+        )[0]["n"]
+        episodes = self.store.run(
+            "MATCH (ep:Episode) WHERE ep.ns = $ns RETURN count(ep) AS n", {"ns": ns}
+        )[0]["n"]
         disputed = self.store.run(
-            "MATCH (:Fact)-[c:CONTRADICTS]->(:Fact) WHERE NOT c.resolved RETURN count(c) AS n"
+            "MATCH (a:Fact)-[c:CONTRADICTS]->(b:Fact) "
+            "WHERE a.ns = $ns AND b.ns = $ns AND NOT c.resolved RETURN count(c) AS n",
+            {"ns": ns},
         )[0]["n"]
         resolved = self.store.run(
-            "MATCH (:Fact)-[c:CONTRADICTS]->(:Fact) WHERE c.resolved RETURN count(c) AS n"
+            "MATCH (a:Fact)-[c:CONTRADICTS]->(b:Fact) "
+            "WHERE a.ns = $ns AND b.ns = $ns AND c.resolved RETURN count(c) AS n",
+            {"ns": ns},
         )[0]["n"]
-        slots = self.store.run("MATCH (f:Fact) RETURN count(DISTINCT f.slot) AS n")[0]["n"]
+        slots = self.store.run(
+            "MATCH (f:Fact) WHERE f.ns = $ns RETURN count(DISTINCT f.slot) AS n", {"ns": ns}
+        )[0]["n"]
         span = self.store.run(
-            "MATCH (f:Fact) RETURN min(f.recordedAt) AS oldest, max(f.recordedAt) AS newest"
+            "MATCH (f:Fact) WHERE f.ns = $ns "
+            "RETURN min(f.recordedAt) AS oldest, max(f.recordedAt) AS newest",
+            {"ns": ns},
         )[0]
         top = self.store.run(
-            "MATCH (f:Fact)-[:ABOUT]->(e:Entity) "
-            "RETURN e.name AS entity, count(f) AS facts ORDER BY facts DESC LIMIT 10"
+            "MATCH (f:Fact)-[:ABOUT]->(e:Entity) WHERE f.ns = $ns "
+            "RETURN e.name AS entity, count(f) AS facts ORDER BY facts DESC LIMIT 10",
+            {"ns": ns},
         )
+        sensitive = self.store.run(
+            "MATCH (f:Fact) WHERE f.ns = $ns AND coalesce(f.sensitive, false) = true "
+            "RETURN count(f) AS n",
+            {"ns": ns},
+        )[0]["n"]
         return {
             "store": self.store.path,
+            "namespace": ns,
             "entities": entities,
             "episodes": episodes,
             "slots": slots,
@@ -862,6 +1017,7 @@ class Memory:
                 "retracted": by_status.get(schema.STATUS_RETRACTED, 0),
                 "expired": by_status.get(schema.STATUS_EXPIRED, 0),
                 "total": sum(by_status.values()),
+                "sensitive": sensitive,
             },
             "contradictions": {"open": disputed, "resolved": resolved},
             "oldest_memory": to_iso(span["oldest"]),
@@ -871,13 +1027,28 @@ class Memory:
 
     def export_graph(self) -> Row:
         """Nodes and edges as JSON — feeds the browser explorer."""
+        ns = self.namespace
         nodes: list[Row] = []
+        seen_entities: set[str] = set()
         for r in self.store.run(
-            "MATCH (e:Entity) RETURN e.key AS id, e.name AS name, e.kind AS kind"
+            "MATCH (f:Fact)-[:ABOUT]->(e:Entity) WHERE f.ns = $ns "
+            "RETURN DISTINCT e.key AS id, e.name AS name, e.kind AS kind",
+            {"ns": ns},
         ):
+            seen_entities.add(r["id"])
             nodes.append({"id": r["id"], "type": "Entity", "label": r["name"], **r})
         for r in self.store.run(
-            "MATCH (ep:Episode) RETURN ep.id AS id, ep.kind AS kind, ep.text AS text, ep.at AS at"
+            "MATCH (ep:Episode)-[:MENTIONS]->(e:Entity) WHERE ep.ns = $ns "
+            "RETURN DISTINCT e.key AS id, e.name AS name, e.kind AS kind",
+            {"ns": ns},
+        ):
+            if r["id"] not in seen_entities:
+                seen_entities.add(r["id"])
+                nodes.append({"id": r["id"], "type": "Entity", "label": r["name"], **r})
+        for r in self.store.run(
+            "MATCH (ep:Episode) WHERE ep.ns = $ns "
+            "RETURN ep.id AS id, ep.kind AS kind, ep.text AS text, ep.at AS at",
+            {"ns": ns},
         ):
             nodes.append(
                 {
@@ -890,8 +1061,10 @@ class Memory:
                 }
             )
         for r in self.store.run(
-            "MATCH (f:Fact) RETURN f.id AS id, f.text AS text, f.slot AS slot, "
-            "f.status AS status, f.recordedAt AS recordedAt"
+            "MATCH (f:Fact) WHERE f.ns = $ns "
+            "RETURN f.id AS id, f.text AS text, f.slot AS slot, "
+            "f.status AS status, f.recordedAt AS recordedAt",
+            {"ns": ns},
         ):
             nodes.append(
                 {
@@ -906,17 +1079,33 @@ class Memory:
 
         edges: list[Row] = []
         for rel, q in (
-            ("FROM", "MATCH (f:Fact)-[:FROM]->(ep:Episode) RETURN f.id AS source, ep.id AS target"),
-            ("ABOUT", "MATCH (f:Fact)-[:ABOUT]->(e:Entity) RETURN f.id AS source, e.key AS target"),
-            ("MENTIONS", "MATCH (ep:Episode)-[:MENTIONS]->(e:Entity) RETURN ep.id AS source, e.key AS target"),
-            ("SUPERSEDES", "MATCH (a:Fact)-[:SUPERSEDES]->(b:Fact) RETURN a.id AS source, b.id AS target"),
+            (
+                "FROM",
+                "MATCH (f:Fact)-[:FROM]->(ep:Episode) WHERE f.ns = $ns "
+                "RETURN f.id AS source, ep.id AS target",
+            ),
+            (
+                "ABOUT",
+                "MATCH (f:Fact)-[:ABOUT]->(e:Entity) WHERE f.ns = $ns "
+                "RETURN f.id AS source, e.key AS target",
+            ),
+            (
+                "MENTIONS",
+                "MATCH (ep:Episode)-[:MENTIONS]->(e:Entity) WHERE ep.ns = $ns "
+                "RETURN ep.id AS source, e.key AS target",
+            ),
+            (
+                "SUPERSEDES",
+                "MATCH (a:Fact)-[:SUPERSEDES]->(b:Fact) WHERE a.ns = $ns "
+                "RETURN a.id AS source, b.id AS target",
+            ),
             (
                 "CONTRADICTS",
-                "MATCH (a:Fact)-[c:CONTRADICTS]->(b:Fact) "
+                "MATCH (a:Fact)-[c:CONTRADICTS]->(b:Fact) WHERE a.ns = $ns "
                 "RETURN a.id AS source, b.id AS target, c.resolved AS resolved, c.score AS score",
             ),
         ):
-            for r in self.store.run(q):
+            for r in self.store.run(q, {"ns": ns}):
                 edges.append({"type": rel, **r})
         return {"nodes": nodes, "edges": edges}
 

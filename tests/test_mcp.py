@@ -123,3 +123,22 @@ async def test_stats_and_graph_over_mcp(tmp_path):
         r = await session.call_tool("graph", {})
         graph = json.loads(_text(r))
         assert {n["type"] for n in graph["nodes"]} >= {"Entity", "Fact"}
+
+
+async def test_sensitive_facts_over_mcp(tmp_path):
+    async with open_session(tmp_path) as session:
+        r = await session.call_tool(
+            "remember",
+            {"text": "The staging box uses port 8443.", "about": ["staging"],
+             "slot": "staging/port", "sensitive": True},
+        )
+        report = json.loads(_text(r))
+        assert report["sensitive"] is True
+
+        r = await session.call_tool("recall", {"query": "staging box port", "k": 3})
+        assert json.loads(_text(r)), "visible by default"
+
+        r = await session.call_tool(
+            "recall", {"query": "staging box port", "k": 3, "include_sensitive": False}
+        )
+        assert json.loads(_text(r)) == [], "hidden when asked"

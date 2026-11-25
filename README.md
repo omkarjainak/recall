@@ -17,7 +17,7 @@ graph — one file, no server, no signup.
 
 ---
 
-## The problem
+## Use case
 
 Three things go wrong with naive agent memory:
 
@@ -41,9 +41,13 @@ Recall treats memory as a graph of **entities**, **episodes** (evidence), and
 | **Resolution** | `resolve_contradiction(keep, drop, note)` keeps one fact, *retracts* (never deletes) the other, and records the decision as an episode — so `why` still explains the outcome. |
 | **Hybrid recall** | Vector search + full-text search fused by reciprocal rank **inside one Cypher statement**, then re-ranked by similarity, recency decay, reinforcement (access count) and importance. |
 | **Bi-temporal timelines** | Facts carry valid time *and* record time. `timeline --on 2026-03-15` answers "who reviewed releases then" and "who did the agent think did" — two different, both correct, answers. |
+| **Namespaces** | One store, many tenants: `Memory(path, namespace="agent-a")` scopes every read and write. Conflicts, supersession and stats never cross a namespace boundary. |
+| **Privacy** | Credential-shaped strings (AWS/GitHub/Slack/OpenAI keys, JWTs, `password=…`) are redacted *before* they are written; `sensitive` facts can be hidden from `recall(include_sensitive=False)`. |
+| **Pluggable policies** | Slot derivation, the contradiction checker and ranking weights are policy objects (`recall.policies`): swap the lexical checker for an NLI model, or the ranking for your own, without touching the engine. |
 | **Memory hygiene** | `consolidate()` closes stale, low-importance, never-recalled facts (`expired`); `forget()` retracts. Both leave the audit trail intact. |
 | **MCP server** | Ten semantic tools (`remember`, `recall`, `why`, `contradictions`, `resolve_contradiction`, …) for any MCP host: Claude Code, Cursor, Codex, Gemini CLI, OpenCode. |
 | **Graph explorer** | `recall explore` writes a self-contained HTML page: the whole memory as a force-directed graph, contradictions in red, supersessions dashed, provenance on click. |
+| **Eval suite** | `recall eval` scores Recall against independent labeled data in [`evals/`](evals/) — contradiction F1 and retrieval recall@k/MRR with enforced thresholds, run in CI. |
 
 ## How it uses Relate
 
@@ -67,15 +71,17 @@ Recall treats memory as a graph of **entities**, **episodes** (evidence), and
 
 - **Cypher 25** for every read and write, with parameters (`$name`) everywhere
   values appear — nothing interpolated into statements.
-- **Vector index + `SEARCH`** with `WITH [f.closedAt]` pre-filtering, so
-  closed facts are dropped *inside* the index before `LIMIT` counts to k.
-- **Full-text index + `SEARCH`** (BM25) over fact text.
+- **Vector index + `SEARCH`** with `WITH [f.closedAt, f.ns]` pre-filtering, so
+  closed facts *and other namespaces* are dropped inside the index before
+  `LIMIT` counts to k (schema v2; v1 stores migrate in place on first open).
+- **Full-text index + `SEARCH`** (BM25) over fact text, filtered post-search
+  (Relate's fulltext `SEARCH` takes no inline `WHERE`).
 - **Hybrid search**: vector and full-text fused by reciprocal rank in a
   `CALL () { … UNION ALL … }` subquery — one statement, one round trip.
 - **`vector(embedding, 256, FLOAT32)`** typed vectors that fail loudly on
   dimension mismatches.
 - **Constraints** (`UNIQUE` on entity key, episode id, fact id) and **range
-  indexes** on slot, status and recorded time.
+  indexes** on slot, status, recorded time and namespace.
 - **Transactions** (`autocommit=False`) so a multi-statement write (episode +
   fact + supersessions + contradiction edges) is atomic.
 - **Read-only opens** for recall-only consumers; **persistent stores** as a
@@ -103,7 +109,8 @@ Verify:
 
 ```bash
 recall --help
-python -m pytest                   # 34 tests, ~10 s
+python -m pytest       # 74 tests, ~15 s
+recall eval            # the independent eval suite: PASS
 ```
 
 ### 2. See the whole story in 60 seconds
@@ -189,11 +196,57 @@ for hit in mem.recall("Where does Priya live?"):
     print(hit["score"], hit["text"], hit["disputed"], hit["evidence"])
 ```
 
+Production knobs — all optional, all defaults reproduce the behavior above:
+
+```python
+from recall import Memory
+from recall.policies import entity_slot, FunctionChecker, RankingPolicy
+
+mem = Memory(
+    "./memory.rl",
+    namespace="agent-a",              # multi-tenant scoping (schema v2)
+    slot_strategy=entity_slot,        # or "claim" (default) / "unique" / your fn
+    checker=FunctionChecker(my_nli),  # swap the lexical conflict scorer
+    ranking=RankingPolicy(recency_weight=0.9),
+    scrub_secrets=True,               # redact credentials before writing (on)
+)
+mem.remember("Our anniversary is June 12.", sensitive=True)
+mem.recall("anniversary", include_sensitive=False)   # hides it
+```
+
+### 7. Run the eval suite
+
+The repo ships **independent labeled data** — a travel-planning memory, not
+the demo story — under [`evals/data/`](evals/data/):
+
+```bash
+recall eval
+```
+
+```
+travel-contradictions  (24 cases)
+  accuracy               1.000
+  macro_f1               1.000
+travel-retrieval  (8 queries)
+  recall@3               1.000
+  mrr                    1.000
+thresholds: PASS
+```
+
+Two tasks: **contradiction** (predict `contradiction`/`duplicate`/
+`unrelated` for a pair, using the exact scoring path `remember` uses) and
+**retrieval** (seed a fresh store, ask questions, measure recall@k / MRR).
+Every dataset declares thresholds, `tests/test_eval.py` enforces them, and
+the whole thing is deterministic — same numbers every run. It caught real
+regressions while being built (a negation flip once scored as a
+*duplicate*, and single-digit numbers were dropped from claim tokens).
+
 ## Where the data lives
 
 | Path | What it is |
 |---|---|
-| [`data/demo-memory/`](data/demo-memory/) | The committed demo store (directory, JSON codec) — the story the demo tells. `graph.json` is the whole memory in readable JSON; `.relate/schema/schema.cypher` is the schema as a file. |
+| [`data/demo-memory/`](data/demo-memory/) | The committed demo store (directory, JSON codec, schema v2) — the story the demo tells. `graph.json` is the whole memory in readable JSON; `.relate/schema/schema.cypher` is the schema as a file. |
+| [`evals/data/`](evals/data/) | The independent eval datasets (JSON, hand-labeled) that `recall eval` scores against. |
 | `./memory.rl` | The default live store, created on first write (single file). Not committed. |
 
 Inspect the demo store with the Relate CLI (read-only):
@@ -237,20 +290,26 @@ holds and what the demo video shows):
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 34 tests: unit, engine end-to-end, and MCP over stdio
+pytest            # 74 tests: unit, engine, namespaces, privacy, migration, evals, MCP over stdio
+recall eval       # the eval suite on independent data (evals/data)
 ```
 
 ```
 src/recall/
-  embed.py       deterministic offline embeddings (pluggable: bring your own)
-  tokens.py      claim/frame analysis — the contradiction heuristics
-  schema.py      the graph schema on Relate
-  store.py       thread-safe relate wrapper (one owner thread, one writer)
-  memory.py      the engine: remember / recall / why / timeline / resolve
-  mcp_server.py  the MCP server (10 tools)
-  explorer.py    self-contained HTML graph explorer
-  demo.py        the scripted walkthrough (and the video script)
-  cli.py         the `recall` command
+  embed.py        deterministic offline embeddings (pluggable: bring your own)
+  tokens.py       claim/frame analysis — the contradiction heuristics
+  policies.py     pluggable slot strategies, contradiction checkers, ranking
+  privacy.py      credential redaction before anything is written
+  schema.py       the graph schema on Relate (v2: namespaces, migration)
+  store.py        thread-safe relate wrapper (one owner thread, one writer)
+  memory.py       the engine: remember / recall / why / timeline / resolve
+  evaluation.py   the eval runner (datasets live in evals/data/)
+  mcp_server.py   the MCP server (10 tools)
+  explorer.py     self-contained HTML graph explorer
+  demo.py         the scripted walkthrough (and the video script)
+  cli.py          the `recall` command
+evals/data/       independent labeled datasets (contradiction + retrieval)
+tests/            74 tests across 9 files
 ```
 
 **Plugging in a real embedding model.** The default embedder is deterministic
@@ -268,12 +327,21 @@ The dimension count is fixed when a store is created and enforced afterwards.
 
 - Contradiction detection is deterministic and *lexical*: same frame,
   different claim (or a negation flip). It is a strong signal for flagging —
-  the final call is the agent's, via `resolve_contradiction`.
-- One process may write a store at a time (a Relate guarantee). Recall's MCP
+  the final call is the agent's, via `resolve_contradiction`. To go
+  model-assisted, wrap an NLI scorer in `recall.policies.FunctionChecker`
+  and pass it to `Memory(checker=…)`; the seam is already there.
+- One process may open a store at a time (a Relate guarantee). Recall's MCP
   server owns its store; add `--read-only` for recall-only hosts.
+  Namespaces still work: open the store once per namespace in turn (that is
+  how `tests/test_namespaces.py` drives them).
 - Slots group facts that answer the same question; give them explicitly for
-  clean supersession. Without one, Recall derives a slot from the entity and
-  claim words.
+  clean supersession. Without one, Recall derives a slot via the memory's
+  `slot_strategy` (`claim` by default).
+- Entity nodes are shared across namespaces (keys are global); isolation
+  applies to facts, episodes, contradictions and every read path.
+- Secret redaction is pattern-based (shaped credentials), not a guarantee
+  against every private detail — mark what is private with
+  `sensitive=True`.
 
 ## Credits
 
