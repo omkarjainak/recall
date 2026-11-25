@@ -17,6 +17,28 @@ graph — one file, no server, no signup.
 
 ---
 
+## Run it
+
+```bash
+git clone https://github.com/omkarjainak/recall
+cd recall
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[mcp,dev]"
+```
+
+Three commands show everything (each takes seconds):
+
+```bash
+recall demo                                                  # the whole story in 60 s
+recall --db data/demo-memory --read-only recall "Where does Priya live?"   # the committed memory
+python -m pytest && recall eval                              # 74 tests + eval suite: PASS
+```
+
+No server, no database install, no API keys — Relate runs inside the
+process. Full walkthrough below under [Setup and run](#setup-and-run).
+
+---
+
 ## Use case
 
 Three things go wrong with naive agent memory:
@@ -169,7 +191,7 @@ For Claude Code / OpenCode / Cursor (`mcp.json`):
   "mcpServers": {
     "recall": {
       "command": "recall",
-      "args": ["serve", "--db", "/path/to/memory.rl"]
+      "args": ["serve", "--db", "/path/to/memory.rl", "--namespace", "agent-a"]
     }
   }
 }
@@ -177,7 +199,8 @@ For Claude Code / OpenCode / Cursor (`mcp.json`):
 
 The agent gets ten tools: `remember`, `remember_many`, `recall`, `why`,
 `contradictions`, `resolve_contradiction`, `forget`, `timeline`, `stats`,
-`graph`.
+`graph`. `--namespace` scopes the server to one tenant; `--read-only`
+serves a store without writes.
 
 ### 6. Use it as a library
 
