@@ -127,12 +127,13 @@ true-vs-believed timeline. It writes to `./memory.rl` (created on first run).
 ### 3. Ask the committed demo memory
 
 The repo ships a real store with that exact story at
-[`data/demo-memory/`](data/demo-memory/) — read it, don't rewrite it:
+[`data/demo-memory/`](data/demo-memory/) — read it, don't rewrite it
+(`--read-only` keeps it byte-for-byte pristine):
 
 ```bash
-recall --db data/demo-memory recall "Where does Priya live?" -k 2
-recall --db data/demo-memory contradictions --all
-recall --db data/demo-memory timeline --slot relate/release-reviewer --on 2026-03-15
+recall --db data/demo-memory --read-only recall "Where does Priya live?" -k 2
+recall --db data/demo-memory --read-only contradictions --all
+recall --db data/demo-memory --read-only timeline --slot relate/release-reviewer --on 2026-03-15
 recall --db data/demo-memory explore --open     # the memory graph in your browser
 ```
 

@@ -276,6 +276,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"namespace to scope this session to (default: {DEFAULT_NAMESPACE})",
     )
     p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument(
+        "--read-only",
+        action="store_true",
+        help="open the store without writes (also skips recall access tracking)",
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init", help="create the store and schema")
@@ -341,7 +346,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--params", help="JSON object of parameters")
 
     sp = sub.add_parser("serve", help="run the MCP server for agent hosts")
-    sp.add_argument("--read-only", action="store_true")
     sp.add_argument("--transport", default="stdio", choices=["stdio", "streamable-http"])
 
     sub.add_parser("demo", help="scripted end-to-end walkthrough")
@@ -357,6 +361,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
         sp.add_argument("--db", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
         sp.add_argument("--namespace", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+        sp.add_argument("--read-only", action="store_true", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
     return p
 
@@ -391,7 +396,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.command in SELF_STORED:
         COMMANDS[args.command](None, args)
         return
-    mem = Memory(args.db, namespace=args.namespace)
+    mem = Memory(args.db, namespace=args.namespace, read_only=args.read_only)
     try:
         COMMANDS[args.command](mem, args)
     finally:
