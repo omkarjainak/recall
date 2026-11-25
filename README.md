@@ -376,4 +376,9 @@ The dimension count is fixed when a store is created and enforced afterwards.
 
 ## License
 
-MIT
+[PolyForm Noncommercial 1.0.0](LICENSE) — Copyright (c) 2026 Omkar Jainak.
+
+Free for personal, research, educational and other **non-commercial** use:
+use it, change it, ship it — just not as part of something you sell or
+monetize. For commercial licensing, contact the author via
+[GitHub](https://github.com/omkarjainak).

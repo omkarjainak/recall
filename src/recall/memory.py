@@ -433,6 +433,16 @@ class Memory:
                         "status": schema.STATUS_SUPERSEDED,
                     },
                 )
+                # a superseded fact is no longer current, so its open disputes
+                # are moot — the new fact re-enters conflict analysis itself
+                st.run(
+                    self._MOOT_EDGE,
+                    {
+                        "id": old_id,
+                        "resolution": "superseded",
+                        "note": f"moot: {old_id} was superseded by {fact_id}",
+                    },
+                )
             for conf in conflicts:
                 st.run(
                     "MATCH (a:Fact {id: $a}), (b:Fact {id: $b}) "
@@ -757,13 +767,20 @@ class Memory:
         )
         if not rows:
             raise KeyError(f"no fact with id {fact_id!r}")
-        # resolve any open contradictions this fact was part of
+        # a retracted fact leaves nothing to decide: settle its open
+        # contradictions as moot, in both directions
         self.store.write(
-            "MATCH (f:Fact {id: $id})-[c:CONTRADICTS]->(other) WHERE NOT c.resolved "
-            "SET c.resolved = true, c.resolution = 'retracted', c.note = $reason",
-            {"id": fact_id, "reason": reason},
+            self._MOOT_EDGE,
+            {"id": fact_id, "resolution": "retracted", "note": reason},
         )
         return rows[0]
+
+    # A contradiction is only actionable while both sides are current; when a
+    # fact is closed (retracted, superseded, expired) its open edges are moot.
+    _MOOT_EDGE = (
+        "MATCH (f:Fact {id: $id})-[c:CONTRADICTS]-(other) WHERE NOT c.resolved "
+        "SET c.resolved = true, c.resolution = $resolution, c.note = $note"
+    )
 
     def consolidate(self, *, older_than_days: float = 90.0, min_importance: float = 0.3) -> Row:
         """Close stale, unimportant, untouched facts (status ``expired``).
@@ -888,6 +905,16 @@ class Memory:
                     "status": schema.STATUS_RETRACTED,
                     "reason": note or f"contradiction resolved in favor of {keep_id}",
                     "ep": ep_id,
+                },
+            )
+            # any *other* open contradictions the dropped fact was part of are
+            # moot once it is retracted — nothing left to decide about it
+            st.run(
+                self._MOOT_EDGE,
+                {
+                    "id": drop_id,
+                    "resolution": "retracted",
+                    "note": f"moot: {drop_id} was retracted in {ep_id}",
                 },
             )
 

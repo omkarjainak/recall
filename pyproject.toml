@@ -9,7 +9,7 @@ description = "Recall — contradiction-aware long-term memory for AI agents, on
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
-authors = [{ name = "Recall contributors" }]
+authors = [{ name = "Omkar Jainak" }]
 keywords = ["agent-memory", "relate", "graph-database", "mcp", "ai-agents", "provenance"]
 dependencies = [
     "relate-db>=1.2.0",

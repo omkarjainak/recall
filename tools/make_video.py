@@ -234,7 +234,7 @@ def end_card(f) -> Image.Image:
     d.text((W // 2, 610), "try it:  pip install -e \".[mcp]\"  &&  recall demo",
            font=f["sub"], fill=CYAN, anchor="mm")
     d.text((W // 2, 680), "github.com/omkarjainak/recall", font=f["sub"], fill=DIM, anchor="mm")
-    d.text((W // 2, 730), "Relate by Neo4j Hackathon  ·  MIT",
+    d.text((W // 2, 730), "Relate by Neo4j Hackathon  ·  PolyForm Noncommercial",
            font=f["small"], fill=DIM, anchor="mm")
     return img
 
